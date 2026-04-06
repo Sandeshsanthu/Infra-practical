@@ -1,12 +1,16 @@
-variable "vpc_cidr" {
-    type = string
+resource "aws_vpc" "main" {
+    cidr_block = var.vpc_cidr
+    tags = {
+      name = "${var.name_prefix}-vpc"
+    }
   
 }
-variable "subnet_cidr" {
-    type = string
-  
-}
-variable "name_prefix" {
-    type = string
+
+resource "aws_subnet" "public" {
+    vpc_id = aws_vpc.main.id
+    cidr_block = var.subnet_cidr
+    tags = { name= "${var.name_prefix}-public-subnet"}
+
+
   
 }

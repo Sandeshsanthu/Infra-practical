@@ -1,7 +1,13 @@
-resource "aws_vpc" "main" {
-    cidr_block = var.vpc_cidr
-    tags = {
-      name = "${var.name_prefix}-vpc"
-    }
+
+variable "vpc_cidr" {
+    type = string
+  
+}
+variable "subnet_cidr" {
+    type = string
+  
+}
+variable "name_prefix" {
+    type = string
   
 }
