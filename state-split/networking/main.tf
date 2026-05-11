@@ -22,6 +22,6 @@ resource "aws_db_subnet_group" "main" {
 }
 
 
-output "my_subnet_id" {
+output "subnet_id" {
   value = aws_subnet.subnet_1.id
 }
