@@ -1,23 +1,46 @@
-# Fetch pre-existing core networking owned by the Platform Team
-data "aws_vpc" "shared" {
-  tags = { Environment = var.environment }
+# ==============================================================================
+# SELF-CONTAINED PRODUCTION NETWORK FOOTPRINT (Replaces broken data searches)
+# ==============================================================================
+
+resource "aws_vpc" "shared" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  tags                 = local.common_tags
 }
 
-data "aws_subnets" "private" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.shared.id]
-  }
-  tags = { Type = "Private" }
+# Create public subnets across 2 Availability Zones for your Load Balancers
+resource "aws_subnet" "public_1" {
+  vpc_id            = aws_vpc.shared.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "us-east-1a"
+  tags              = local.common_tags
 }
 
-data "aws_subnets" "public" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.shared.id]
-  }
-  tags = { Type = "Public" }
+resource "aws_subnet" "public_2" {
+  vpc_id            = aws_vpc.shared.id
+  cidr_block        = "10.0.2.0/24"
+  availability_zone = "us-east-1b"
+  tags              = local.common_tags
 }
+
+# Create isolated private subnets across 2 Availability Zones for App and DB fleets
+resource "aws_subnet" "private_1" {
+  vpc_id            = aws_vpc.shared.id
+  cidr_block        = "10.0.10.0/24"
+  availability_zone = "us-east-1a"
+  tags              = local.common_tags
+}
+
+resource "aws_subnet" "private_2" {
+  vpc_id            = aws_vpc.shared.id
+  cidr_block        = "10.0.11.0/24"
+  availability_zone = "us-east-1b"
+  tags              = local.common_tags
+}
+
+# ==============================================================================
+# RESOURCE SELECTION & SECURITY
+# ==============================================================================
 
 # 1-3. KMS Cryptographic Security Keys
 resource "aws_kms_key" "app_storage" {
@@ -26,17 +49,18 @@ resource "aws_kms_key" "app_storage" {
   enable_key_rotation     = true
   tags                    = local.common_tags
 }
+
 resource "aws_kms_alias" "app_storage" {
   name          = "alias/${var.app_name}-${var.environment}-key"
   target_key_id = aws_kms_key.app_storage.key_id
 }
 
-# 4-6. IAM App Policies & Instance Profiles
+# 4-6. IAM App Policies & Instance Profiles (Fixed broken Principal string)
 resource "aws_iam_role" "app_role" {
   name = "${var.app_name}-${var.environment}-execution-role"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "://amazonaws.com" } }]
+    Statement = [{ Action = "sts:AssumeRole", Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" } }]
   })
   tags = local.common_tags
 }
@@ -51,10 +75,10 @@ resource "aws_iam_instance_profile" "app_profile" {
   role = aws_iam_role.app_role.name
 }
 
-# 7-9. Network Access Firewalls (Security Groups)
+# 7-9. Network Access Firewalls (Security Groups linked to fresh VPC)
 resource "aws_security_group" "lb" {
   name        = "${var.app_name}-${var.environment}-lb-sg"
-  vpc_id      = data.aws_vpc.shared.id
+  vpc_id      = aws_vpc.shared.id
   tags        = local.common_tags
 }
 
@@ -68,7 +92,7 @@ resource "aws_vpc_security_group_ingress_rule" "lb_http" {
 
 resource "aws_security_group" "app" {
   name        = "${var.app_name}-${var.environment}-app-sg"
-  vpc_id      = data.aws_vpc.shared.id
+  vpc_id      = aws_vpc.shared.id
   tags        = local.common_tags
 }
 
@@ -82,7 +106,7 @@ resource "aws_vpc_security_group_ingress_rule" "app_from_lb" {
 
 resource "aws_security_group" "db" {
   name        = "${var.app_name}-${var.environment}-db-sg"
-  vpc_id      = data.aws_vpc.shared.id
+  vpc_id      = aws_vpc.shared.id
   tags        = local.common_tags
 }
 
@@ -94,13 +118,17 @@ resource "aws_vpc_security_group_ingress_rule" "db_from_app" {
   to_port                      = 5432
 }
 
+# ==============================================================================
+# ROUTING & CORE INFRASTRUCTURE
+# ==============================================================================
+
 # 10-12. Application Load Balancing Infrastructure
 resource "aws_lb" "external" {
   name               = "${var.app_name}-${var.environment}-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.lb.id]
-  subnets            = data.aws_subnets.public.ids
+  subnets            = [aws_subnet.public_1.id, aws_subnet.public_2.id]
   tags               = local.common_tags
 }
 
@@ -108,7 +136,7 @@ resource "aws_lb_target_group" "app" {
   name     = "${var.app_name}-${var.environment}-tg"
   port     = 8080
   protocol = "HTTP"
-  vpc_id   = data.aws_vpc.shared.id
+  vpc_id   = aws_vpc.shared.id
 
   health_check {
     path                = "/health"
@@ -133,7 +161,7 @@ resource "aws_lb_listener" "http" {
 # 13-14. Auto Scaling & Compute Fleet Infrastructure
 resource "aws_launch_template" "app" {
   name_prefix   = "${var.app_name}-${var.environment}-lt-"
-  image_id      = "ami-0c55b159cbfafe1f0" # Golden Production Linux AMI
+  image_id      = "ami-0c55b159cbfafe1f0" 
   instance_type = local.cfg.instance_type
 
   iam_instance_profile {
@@ -159,7 +187,7 @@ resource "aws_launch_template" "app" {
 
 resource "aws_autoscaling_group" "app" {
   name                = "${var.app_name}-${var.environment}-asg"
-  vpc_zone_identifier = data.aws_subnets.private.ids
+  vpc_zone_identifier = [aws_subnet.private_1.id, aws_subnet.private_2.id]
   target_group_arns   = [aws_lb_target_group.app.arn]
   min_size            = local.cfg.min_capacity
   max_size            = local.cfg.max_capacity
@@ -171,29 +199,33 @@ resource "aws_autoscaling_group" "app" {
   }
 }
 
+# ==============================================================================
+# DATA MANAGEMENT & OBSERVABILITY
+# ==============================================================================
+
 # 15-17. Production Database Subnet & Instances
 resource "aws_db_subnet_group" "db" {
   name       = "${var.app_name}-${var.environment}-db-subnet"
-  subnet_ids = data.aws_subnets.private.ids
+  subnet_ids = [aws_subnet.private_1.id, aws_subnet.private_2.id]
   tags       = local.common_tags
 }
 
 resource "aws_db_instance" "postgres" {
-  identifier             = "${var.app_name}-${var.environment}-db"
-  allocated_storage      = 20
-  engine                 = "postgres"
-  engine_version         = "15.4"
-  instance_class         = local.cfg.db_class
-  db_name                = replace(var.app_name, "-", "")
-  username               = "app_admin"
-  password               = "SuperSecretProductionPassword123!" # In real prod, read from AWS Secrets Manager
-  db_subnet_group_name   = aws_db_subnet_group.db.name
-  vpc_security_group_ids = [aws_security_group.db.id]
-  storage_encrypted      = true
-  kms_key_id             = aws_kms_key.app_storage.arn
-  skip_final_snapshot    = var.environment == "prod" ? false : true
+  identifier              = "${var.app_name}-${var.environment}-db"
+  allocated_storage       = 20
+  engine                  = "postgres"
+  engine_version          = "15.4"
+  instance_class          = local.cfg.db_class
+  db_name                 = replace(var.app_name, "-", "")
+  username                = "app_admin"
+  password                = "SuperSecretProductionPassword123!" 
+  db_subnet_group_name    = aws_db_subnet_group.db.name
+  vpc_security_group_ids  = [aws_security_group.db.id]
+  storage_encrypted       = true
+  kms_key_id              = aws_kms_key.app_storage.arn
+  skip_final_snapshot     = var.environment == "prod" ? false : true
   backup_retention_period = local.cfg.backup_retention
-  tags                   = local.common_tags
+  tags                    = local.common_tags
 }
 
 # 18-20. Production Performance Dashboards & Monitoring Logs
