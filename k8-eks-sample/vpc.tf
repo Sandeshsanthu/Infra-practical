@@ -13,14 +13,18 @@ module "vpc" {
   single_nat_gateway     = true # Central NAT Gateway for optimization
   one_nat_gateway_per_az = false
 
-  public_subnet_tags = {
-    "kubernetes.io/role/elb" = "1"
+public_subnet_tags = {
+    "kubernetes.io/role/elb"                  = "1"
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
   }
 
+  # FIXED: Added tags to allow EKS to provision internal/private load balancers
   private_subnet_tags = {
-    "kubernetes.io/role/internal-elb" = "1"
-    "karpenter.sh/discovery"          = var.cluster_name
+    "kubernetes.io/role/internal-elb"         = "1"
+    "kubernetes.io/cluster/${var.cluster_name}" = "shared"
   }
+
+
 
   tags = {
     Environment = "production"
