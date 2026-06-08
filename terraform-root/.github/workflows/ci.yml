@@ -1,0 +1,85 @@
+name: "Production Infrastructure Engine"
+
+on:
+  push:
+    branches: [ "main" ]
+    paths: [ "infrastructure/**" ]
+  pull_request:
+    branches: [ "main" ]
+    paths: [ "infrastructure/**" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+# Concurrency group ensures only one execution runs per layer to prevent state file locks
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  orchestrate:
+    name: "Deploy Components"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        # Steps run in sequence. Matrix runs them dynamically by folder path.
+        layer: [ "infrastructure/01-networking", "infrastructure/02-applications" ]
+
+    defaults:
+      run:
+        working-directory: ${{ matrix.layer }}
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    # Production Ready Security: AWS Authentication using OpenID Connect (OIDC)
+    - name: Authenticate to AWS Production Cloud
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Initialize Terraform Runtime
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.7
+
+    - name: Backend Initialisation
+      run: terraform init -input=false
+
+    - name: Validate Configurations Syntax
+      run: terraform validate
+
+    # FAST PR MODE: Drops cloud sync refreshes and scales threads to 30 for high performance evaluations
+    - name: High Concurrency Plan (Pull Requests)
+      if: github.event_name == 'pull_request'
+      run: |
+        terraform plan \
+          -input=false \
+          -refresh=false \
+          -parallelism=30 \
+          -out=tfplan
+
+    # DEEP ANALYSIS MODE: Runs full infrastructure synchronization only on branch merges
+    - name: Comprehensive Plan (Main Merge)
+      if: github.event_name == 'push'
+      run: |
+        terraform plan \
+          -input=false \
+          -refresh=true \
+          -parallelism=30 \
+          -out=tfplan
+
+    # SAFE DEPLOYMENT MODE: Applies the pre-calculated execution artifact at scale
+    - name: High Concurrency Execution Engine (Main Deploy)
+      if: github.event_name == 'push'
+      run: |
+        terraform apply \
+          -input=false \
+          -parallelism=30 \
+          -auto-approve \
+          tfplan
